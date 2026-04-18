@@ -1,70 +1,109 @@
-defmodule Nfa do
-#Parámetros
-#q: lista de estados del NFA, [0, 1, 2, 3]
-#sigma: alfabeto [:a, :b]
-#inicio: 0
-# final: [3]
-#delta: mapa de transiciones {estado, símbolo} => [estados], %{{0,:a}=>[0,1], {0,:b}=>[0], {1,:b}=>[2], {2,:b}=>[3]}
+defmodule Automata do
+  # NFA / DFA se representan como mapas con la forma:
+  #  %{
+  # states: MapSet de estados
+  # alphabet:MapSet de símbolos
+  # transitions:lista de {src, symbol, tgt}  (symbol == :eps para ε),
+  # start
+  # accepting: MapSet
+  # }
 
-#QP - estados AFD
-# sigma_p - alfabeto AFD
-# final_p - aceptados AFD
-# inicio_p - inicial AFD
-# delta_p - transiciones AFD
-
-  def determinize(_q, sigma, inicio, final, delta) do
-    inicio_p = MapSet.new([inicio])
-    final_set = MapSet.new(final)
-
-    {qp, delta_p, final_p} =
-      bfs([inicio_p], MapSet.new([inicio_p]), %{}, [], sigma, final_set, delta)
-
-    {qp, sigma, inicio_p, final_p, delta_p}
+  def powerset([]), do: [[]]
+  def powerset([h | t]) do
+    pss = powerset(t)
+    pss ++ Enum.map(pss, fn ss -> [h | ss] end)
   end
 
-  defp bfs([], visited, delta_p, final_p, _sigma, _final_set, _delta) do
-    {MapSet.to_list(visited), delta_p, final_p}
+  # determinize
+  def determinize(_states, alphabet, start, accepting, transitions) do
+    start_set = MapSet.new([start])
+
+    {dfa_states, dfa_delta} = explore([start_set], MapSet.new([start_set]), %{}, transitions, alphabet)
+
+    final_p =
+      dfa_states
+      |> Enum.filter(fn d_state -> !MapSet.disjoint?(d_state, accepting) end)
+      |> MapSet.new()
+
+    {dfa_states, alphabet, start_set, final_p, dfa_delta}
   end
 
-  defp bfs([current | rest], visited, delta_p, final_p, sigma, final_set, delta) do
-    {new_delta_p, new_states} =
-      Enum.reduce(sigma, {delta_p, []}, fn symbol, {dp_acc, new_acc} ->
-        target = move(current, symbol, delta)
+  # BFS para NFA sin transiciones epsilon
+  defp explore([], visited, delta_acc, _, _), do: {MapSet.to_list(visited), delta_acc}
+  defp explore([current | rest], visited, delta_acc, nfa_trans, alphabet) do
+    {new_states, new_delta} =
+      Enum.reduce(alphabet, {[], delta_acc}, fn symbol, {s_acc, d_acc} ->
+        target =
+          current
+          |> Enum.flat_map(fn s -> Map.get(nfa_trans, {s, symbol}, []) end)
+          |> MapSet.new()
 
-        updated_delta_p =
-          if MapSet.size(target) > 0 do
-            Map.put(dp_acc, {current, symbol}, target)
-          else
-            dp_acc
-          end
-
-        new_unvisited =
-          if MapSet.size(target) > 0 and not MapSet.member?(visited, target) do
-            [target | new_acc]
-          else
-            new_acc
-          end
-
-        {updated_delta_p, new_unvisited}
+        if MapSet.size(target) > 0 do
+          {[target | s_acc], Map.put(d_acc, {current, symbol}, target)}
+        else
+          {s_acc, d_acc}
+        end
       end)
 
-    new_final_p =
-      if MapSet.disjoint?(current, final_set) do
-        final_p
-      else
-        [current | final_p]
-      end
+    unvisited = Enum.reject(new_states, &MapSet.member?(visited, &1))
+    new_visited = Enum.reduce(unvisited, visited, &MapSet.put(&2, &1))
 
-    new_visited = Enum.reduce(new_states, visited, &MapSet.put(&2, &1))
-    new_queue = rest ++ new_states
-
-    bfs(new_queue, new_visited, new_delta_p, new_final_p, sigma, final_set, delta)
+    explore(rest ++ unvisited, new_visited, new_delta, nfa_trans, alphabet)
   end
 
-  defp move(state_set, symbol, delta) do
-    state_set
-    |> MapSet.to_list()
-    |> Enum.flat_map(fn q -> Map.get(delta, {q, symbol}, []) end)
-    |> MapSet.new()
+
+  # e closure
+  def e_closure(transitions, states) do
+    # Convertimos a lista para iterar si es un MapSet
+    states_list = MapSet.to_list(states)
+    do_e_closure(transitions, states_list, MapSet.new(states_list))
+  end
+
+  defp do_e_closure(_transitions, [], visited), do: visited
+  defp do_e_closure(transitions, [current | rest], visited) do
+    eps_targets =
+      Map.get(transitions, {current, :epsilon}, [])
+      |> Enum.reject(&MapSet.member?(visited, &1))
+
+    new_visited = Enum.reduce(eps_targets, visited, &MapSet.put(&2, &1))
+    do_e_closure(transitions, rest ++ eps_targets, new_visited)
+  end
+
+  def e_determinize(_states, alphabet, start, accepting, transitions) do
+    start_set = e_closure(transitions, MapSet.new([start]))
+
+    {dfa_states, dfa_delta} = explore_eps([start_set], MapSet.new([start_set]), %{}, transitions, alphabet)
+
+    final_p =
+      dfa_states
+      |> Enum.filter(fn d_state -> !MapSet.disjoint?(d_state, accepting) end)
+      |> MapSet.new()
+
+    {dfa_states, alphabet, start_set, final_p, dfa_delta}
+  end
+
+  # BFS para NFA con transiciones epsilon
+  defp explore_eps([], visited, delta_acc, _, _), do: {MapSet.to_list(visited), delta_acc}
+  defp explore_eps([current | rest], visited, delta_acc, nfa_trans, alphabet) do
+    {new_states, new_delta} =
+      Enum.reduce(alphabet, {[], delta_acc}, fn symbol, {s_acc, d_acc} ->
+        moved =
+          current
+          |> Enum.flat_map(fn s -> Map.get(nfa_trans, {s, symbol}, []) end)
+          |> MapSet.new()
+
+        target = if MapSet.size(moved) > 0, do: e_closure(nfa_trans, moved), else: MapSet.new()
+
+        if MapSet.size(target) > 0 do
+          {[target | s_acc], Map.put(d_acc, {current, symbol}, target)}
+        else
+          {s_acc, d_acc}
+        end
+      end)
+
+    unvisited = Enum.reject(new_states, &MapSet.member?(visited, &1))
+    new_visited = Enum.reduce(unvisited, visited, &MapSet.put(&2, &1))
+
+    explore_eps(rest ++ unvisited, new_visited, new_delta, nfa_trans, alphabet)
   end
 end
